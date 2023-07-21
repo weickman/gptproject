@@ -13,7 +13,7 @@ itos = {i:s for s,i in stoi.items()}
 vocab_size = len(itos)
 # training split, dev/val split, test split
 # 80%, 10%, 10%
-block_size = 3 
+block_size = 8 
 #Build the Dataset
 def build_dataset(words):
     X, Y = [], []
@@ -40,84 +40,131 @@ Xtrain, Ytrain = build_dataset(words[:n1])
 Xdev, Ydev = build_dataset(words[n1:n2])
 Xtest, Ytest = build_dataset(words[n2:])
 
-#Modules-----------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------
 class Linear:
-    def __init__(self, fan_in, fan_out, bias=True):
-        self.weight = torch.randn((fan_in, fan_out), generator=g) / fan_in**0.5
-        self.bias = torch.zeros(fan_out) if bias else None
-    
-    def __call__(self, x):
-        self.out = x @ self.weight
-        if self.bias is not None:
-            self.out += self.bias
-        return self.out
-    
-    def parameters(self):
-        return [self.weight] + ([] if self.bias is None else [self.bias])
 
+  def __init__(self, fan_in, fan_out, bias=True):
+    self.weight = torch.randn((fan_in, fan_out)) / fan_in**0.5 # note: kaiming init
+    self.bias = torch.zeros(fan_out) if bias else None
+
+  def __call__(self, x):
+    self.out = x @ self.weight
+    if self.bias is not None:
+      self.out += self.bias
+    return self.out
+
+  def parameters(self):
+    return [self.weight] + ([] if self.bias is None else [self.bias])
+
+# -----------------------------------------------------------------------------------------------
 class BatchNorm1d:
 
-    def __init__(self, dim, eps=1e-5, momentum=0.1):
-        self.eps = eps
-        self.momentum = momentum
-        self.training = True
-        #parameters
-        self.gamma = torch.ones(dim)
-        self.beta = torch.zeros(dim)
-        #buffers trained with running update
-        self.running_mean = torch.zeros(dim)
-        self.running_var = torch.ones(dim)
+  def __init__(self, dim, eps=1e-5, momentum=0.1):
+    self.eps = eps
+    self.momentum = momentum
+    self.training = True
+    # parameters (trained with backprop)
+    self.gamma = torch.ones(dim)
+    self.beta = torch.zeros(dim)
+    # buffers (trained with a running 'momentum update')
+    self.running_mean = torch.zeros(dim)
+    self.running_var = torch.ones(dim)
 
-    def __call__(self, x):
-        #calculate forward pass
-        if self.training:
-            xmean = x.mean(0, keepdim=True) 
-            xvar = x.var(0, keepdim=True)
-        else:
-            xmean = self.running_mean
-            xvar = self.running_var
-        xhat = (x - xmean) / torch.sqrt(xvar + self.eps) #normalize to unit variance
-        self.out = self.gamma * xhat + self.beta
-        #Update the Buffers
-        if self.training:
-            with torch.no_grad():
-                self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * xmean
-                self.running_var = (1 - self.momentum) * self.running_var + self.momentum * xvar
-        return self.out
-    
-    def parameters(self):
-        return [self.gamma, self.beta]
+  def __call__(self, x):
+    # calculate the forward pass
+    if self.training:
+      if x.ndim == 2:
+        dim = 0
+      elif x.ndim == 3:
+        dim = (0,1)
+      xmean = x.mean(dim, keepdim=True) # batch mean
+      xvar = x.var(dim, keepdim=True) # batch variance
+    else:
+      xmean = self.running_mean
+      xvar = self.running_var
+    xhat = (x - xmean) / torch.sqrt(xvar + self.eps) # normalize to unit variance
+    self.out = self.gamma * xhat + self.beta
+    # update the buffers
+    if self.training:
+      with torch.no_grad():
+        self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * xmean
+        self.running_var = (1 - self.momentum) * self.running_var + self.momentum * xvar
+    return self.out
 
+  def parameters(self):
+    return [self.gamma, self.beta]
+
+# -----------------------------------------------------------------------------------------------
 class Tanh:
-    def __call__(self, x):
-        self.out = torch.tanh(x)
-        return self.out
-    def parameters(self):
-        return[]
+  def __call__(self, x):
+    self.out = torch.tanh(x)
+    return self.out
+  def parameters(self):
+    return []
 
-def cmp(s, dt, t):
-    ex = torch.all(dt == t.grad).item()
-    app = torch.allclose(dt, t.grad)
-    maxdiff = (dt - t.grad).abs().max().item
-    print(f'{s:15s} | exact: {str(ex):5s} | approximate: {str(app):5s} | maxdiff: {maxdiff}')
-#----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------
+class Embedding:
+
+  def __init__(self, num_embeddings, embedding_dim):
+    self.weight = torch.randn((num_embeddings, embedding_dim))
+
+  def __call__(self, IX):
+    self.out = self.weight[IX]
+    return self.out
+
+  def parameters(self):
+    return [self.weight]
+
+# -----------------------------------------------------------------------------------------------
+class FlattenConsecutive:
+
+  def __init__(self, n):
+    self.n = n
+
+  def __call__(self, x):
+    B, T, C = x.shape
+    x = x.view(B, T//self.n, C*self.n)
+    if x.shape[1] == 1:
+      x = x.squeeze(1)
+    self.out = x
+    return self.out
+
+  def parameters(self):
+    return []
+
+# -----------------------------------------------------------------------------------------------
+class Sequential:
+
+  def __init__(self, layers):
+    self.layers = layers
+
+  def __call__(self, x):
+    for layer in self.layers:
+      x = layer(x)
+    self.out = x
+    return self.out
+
+  def parameters(self):
+    # get parameters of all layers and stretch them out into one list
+    return [p for layer in self.layers for p in layer.parameters()]
+torch.manual_seed(42)
 #MLP
-n_embed = 10
-n_hidden = 64
+n_embed = 24 #dimensionality of the character embedding vectors
+n_hidden = 128 #number of nuerons in the hidden layer 
 
-g = torch.Generator().manual_seed(2147483647)
-C = torch.randn((vocab_size, n_embed),             generator=g)
-#Layer 1
-W1 = torch.randn((n_embed * block_size, n_hidden), generator = g) * (5/3)/((n_embed * block_size)**0.5)
-b1 = torch.randn(n_hidden,                         generator=g) * 0.1
-#Layer 2
-W2 = torch.randn((n_hidden, vocab_size),           generator=g) * 0.1
-b2 = torch.randn(vocab_size,                       generator=g) * 0.1
-#BatchNorm parameters
-bngain = torch.randn((1, n_hidden)) * 0.1 + 1.0
-bnbias = torch.randn((1, n_hidden)) * 0.1
+model = Sequential([
+    Embedding(vocab_size, n_embed),
+    FlattenConsecutive(2), Linear(n_embed * 2, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
+    FlattenConsecutive(2), Linear(n_hidden * 2, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
+    FlattenConsecutive(2), Linear(n_hidden * 2, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
+    Linear(n_hidden, vocab_size),
+])
 
-parameters = [C, W1, b1, W2, b2, bngain, bnbias]
+with torch.no_grad():
+    #last layer: make less confident
+    model.layers[-1].weight *= 0.1
+
+parameters = model.parameters()
 for p in parameters:
     p.requires_grad = True
 
@@ -128,44 +175,18 @@ lossi = []
 for i in range(max_steps):
 
     #minibatch
-    ix = torch.randint(0, Xtrain.shape[0], (batch_size,), generator=g)
+    ix = torch.randint(0, Xtrain.shape[0], (batch_size,))
     Xb, Yb = Xtrain[ix], Ytrain[ix]
 
     #Forward Pass 
-    emb = C[Xb] #embed the characters into vectors
-    embcat = emb.view(emb.shape[0], -1) #concatenate the vectors
-    #Linear Layer 1
-    hprebn = embcat @ W1 + b1 
-    #BatchNorm layer
-    bnmeani = 1/ n*hprebn.sum(0, keepdim=True)
-    bndiff = hprebn - bnmeani
-    bndiff2 = bndiff**2
-    bnvar = 1/(n-1)*(bndiff2).sum(0, keepdim=True)
-    bnvar_inv = (bnvar + 1e-5)**-0.5
-    bnraw = bndiff * bnvar_inv
-    hpreact = bngain * bnraw + bnbias
-    #Non-Linearity
-    h = torch.tanh(hpreact) #hidden layer
-    #Linear Layer 2
-    logits = h @ W2 + b2 #Output Layer
-    #Cross Entropy Loss
-    logit_maxes = logits.max(1, keepdim=True).values
-    norm_logits = logits - logit_maxes
-    counts = norm_logits.exp()
-    counts_sum = counts.sum(1, keepdim=True)
-    counts_sum_inv = counts_sum**-1
-    probs = counts * counts_sum_inv
-    logprobs = probs.log()
-    loss = -logprobs[range(n), Yb].mean()
+    logits = model(Xb)
+    loss = F.cross_entropy(logits, Yb) #loss function
 
     #Backward Pass
+    for layer in model.layers:
+        layer.out.retain_grad()
     for p in parameters:
         p.grad = None
-    for t in [logprobs, probs, counts, counts_sum, counts_sum_inv, 
-              norm_logits, logit_maxes, logits, h, hpreact, bnraw,
-              bnvar_inv, bnvar, bndiff2, bndiff, hprebn, bnmeani,
-              embcat, emb]:
-        t.retain_grad()
     loss.backward()
 
     #Update
@@ -178,6 +199,10 @@ for i in range(max_steps):
         print(f'{i:7d}: {loss.item():.4f}')
     lossi.append(loss.log10().item())
 
+#Put layer in evaluate mode
+for layers in model.layers:
+    layer.training = False
+
 #Evaluate
 def split_loss(split):
     x,y = {
@@ -185,32 +210,24 @@ def split_loss(split):
         'val' : (Xdev, Ydev),
         'test' : (Xtest, Ytest)
     }[split]
-    emb = C[x]
-    x = emb.view(emb.shape[0], -1)
-    for layer in layers:
-        x = layer(x)
-    loss = F.cross_entropy(x, y)
+    logits = model(x)
+    loss = F.cross_entropy(logits, y)
     print(split, loss.item())
 
-for layer in layers:
-    layer.training = False
+for layer in model.layers:
+  layer.training = False
 split_loss('train')
 split_loss('val')
 
 #Sample from Model
-g = torch.Generator().manual_seed(2147483647 + 10)
 for _ in range(20):
     out = []
     context = [0] * block_size
     while True:
-        emb = C[torch.tensor([context])]
-        x = emb.view(emb.shape[0], -1)
-        for layer in layers:
-            x = layer(x)
-        logits = x
+        logits = model(torch.tensor([context]))
         probs = F.softmax(logits, dim = 1)
         #Sample from Distribution
-        ix = torch.multinomial(probs, num_samples=1, generator=g).item()
+        ix = torch.multinomial(probs, num_samples=1).item()
         context = context[1:] + [ix]
         out.append(ix)
         if ix == 0:
