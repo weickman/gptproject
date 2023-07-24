@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 #Read the words
-words = open('/Users/willeickman/Desktop/Sportsbot/names.txt', 'r').read().splitlines()
+words = open('/Users/willeickman/Desktop/gptproject/names.txt', 'r').read().splitlines()
 
 #Build the Vocabulary of Characters
 chars = sorted(list(set(''.join(words))))

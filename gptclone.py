@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # read it in to inspect it
-with open('dataset.txt', 'r', encoding='utf-8') as f:
+with open("dataset.txt", 'r', encoding='utf-8') as f:
     text = f.read()
 
 #set of unique characters
@@ -35,25 +35,23 @@ def get_batch(split):
     return x, y
 xb, yb = get_batch('train')
 
-for b in range (batch_size):
-    for t in range(block_size):
-        context = xb[b, :t+1]
-        target = yb[b, t]
-
 class BigramLanguageModel(nn.Module):
     
     def __init__(self, vocab_size):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
 
-    def forward(self, idx, targets):
+    def forward(self, idx, targets=None):
         logits = self.token_embedding_table(idx) #(B, T, C)
 
-        B, T, C = logits.shape
-        logits = logits.view(B*T, C)
-        targets = targets.view(B*T)
+        if targets == None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            targets = targets.view(B*T)
+            loss = F.cross_entropy(logits, targets)
 
-        loss = F.cross_entropy(logits, targets)
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
@@ -67,5 +65,6 @@ class BigramLanguageModel(nn.Module):
         return idx
         
 m = BigramLanguageModel(vocab_size)
-out = m(xb, yb)
-
+logits, loss = m(xb, yb)
+print(loss)
+print(decode(m.generate(idx = torch.zeros((1,1), dtype=torch.long), max_new_tokens=100)[0].tolist()))
